@@ -4,7 +4,7 @@ class Puzzle:
         self.name = name
 
     def check(self, input, expected):
-        result = self.solve(input.splitlines())
+        result = self.solve(iter(input.splitlines()))
         if result == expected:
             print(f"OK  {result}")
         else:
