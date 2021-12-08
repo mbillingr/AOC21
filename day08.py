@@ -57,7 +57,14 @@ class Part2(Day08):
             yield from self.backtrack(s, patterns)
 
     def reject(self, partial_mapping, patterns):
-        return False
+        if not partial_mapping:
+            return False
+        # make sure the last added mapping has the right number
+        # of activations for this position
+        x = partial_mapping[-1]
+        n = ACTIVATION_COUNTS[len(partial_mapping) - 1]
+        c = sum(x in p for p in patterns)
+        return c != n
 
     def accept(self, mapping, patterns):
         if len(mapping) < 7:
@@ -93,6 +100,8 @@ DIGIT_PATTERNS = [
     # counts
     # 8687497
 ]
+
+ACTIVATION_COUNTS = [8, 6, 8, 7, 4, 9, 7]
 
 
 def flatten(it):
