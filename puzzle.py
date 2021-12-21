@@ -10,10 +10,14 @@ class Puzzle:
         else:
             raise AssertionError(f"expected {expected}, got {result}")
 
-    def run(self, filename, wrong=()):
-        with open(filename, "rt") as f:
-            lines = (l.strip('\n') for l in f)
-            result = self.solve(lines)
+    def run(self, filename=None, wrong=()):
+        if filename is not None:
+            with open(filename, "rt") as f:
+                lines = (l.strip('\n') for l in f)
+        else:
+            lines = iter("")
+
+        result = self.solve(lines)
 
         if result in wrong:
             raise AssertionError(f"wrong result: {result}")
