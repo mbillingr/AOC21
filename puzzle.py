@@ -14,10 +14,10 @@ class Puzzle:
         if filename is not None:
             with open(filename, "rt") as f:
                 lines = (l.strip('\n') for l in f)
+                result = self.solve(lines)
         else:
             lines = iter("")
-
-        result = self.solve(lines)
+            result = self.solve(lines)
 
         if result in wrong:
             raise AssertionError(f"wrong result: {result}")
