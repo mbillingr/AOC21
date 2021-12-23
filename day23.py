@@ -1,4 +1,3 @@
-from collections import deque
 import heapq
 
 from puzzle import Puzzle
