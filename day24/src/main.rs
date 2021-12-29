@@ -158,3 +158,9 @@ mod tests {
         }
     }
 }
+
+mod foo {
+    fn alu(input: &[i64]) -> i64 {
+
+    }
+}

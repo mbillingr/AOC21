@@ -1,508 +1,332 @@
-from collections import deque
-import itertools
-from puzzle import Puzzle
+import random
 
 
-class Day24(Puzzle):
-    def __init__(self, part):
-        super().__init__(f"Day 24, Part {part}")
+def main():
+    with open('inputs/day24.txt') as fd:
+        program = parse_assignments(fd, 'z')
+
+    # create reference outputs to make sure my program transformations don't break anything
+    digits = [[random.randint(1, 9) for _ in range(14)] for _ in range(1000)]
+    refs = [evaluate(program, d) for d in digits]
+
+    # run an optimization pass to get rid of a few branches and make the program more
+    # compact in general. This speeds up branch expansion considerably.
+    program = optimize(program)
+
+    # replace equality checks with branches. The condition variables become constants
+    # in each branch and enable further optimizations
+    program = expand_branches(program)
+
+    # optimize the branched program. Now it is possible to simplify expressions of the form
+    #   (x * a + y) % a  => y
+    #   (x * a + y) // a  => x
+    program = optimize(program)
+
+    # get rid of all registers and create a single expression.
+    program = inline_variables(program)
+
+    # the program should behave the same as the original program.
+    for d, expected in zip(digits, refs):
+        assert evaluate(program, d) == expected
+
+    # convert the program into an expression that is True when the program would return zero.
+    checker = is_zero(program)
+
+    # simplify the checker
+    checker = simplify_logic(checker)
+
+    # find the largest input that satisfies the checker expression
+    part1 = maximize(checker, [None]*14)
+    print('Day 24, Part 1:', ''.join(map(str, part1)))
+
+    # find the smallest input that satisfies the checker expression
+    part2 = minimize(checker, [None]*14)
+    print('Day 24, Part 2:', ''.join(map(str, part2)))
 
 
-class Part1(Day24):
-    def __init__(self, part=1):
-        super().__init__(part)
+def parse_assignments(code, r_result):
+    def next_input():
+        nonlocal current_input
+        i = current_input
+        current_input += 1
+        return i
+    current_input = 0
 
-    def solve(self, input):
-        code = SSABuilder(input)
-        code.compute_ranges()
-        print(code.eval(code.get('z'), [0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 3, 0, 0, 0]))
-        code.optimize(code.get('z'))
-        print(code.eval(code.get('z'), [1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3, 4, 5]))
-
-        assignments = self.rename(code.assignments)
-
-        self.make_rust(assignments)
-
-        for r, exp in code.assignments.items():
-            print(r, '=', exp)
-
-        self.code = code
-
-        #constraints = {r: None for r in self.code.assignments}
-        #for solution in self.constrain(constraints, self.code.get('z'), 0):
-        #    print(solution)
-        #for solution in self.substitute({}, self.code.get('z'), 0):
-        #    print('*', solution)
-
-    def substitute(self, substitution, r, value):
-        if r in substitution:
-            if substitution[r] == value:
-                # tautology
-                yield substitution
-            else:
-                #contradiction
-                return
-
-        r = self.walk(substitution, r)
-        value = self.walk(substitution, value)
-
-        substitution = insert(substitution, r, value)
-
-        match (self.code.lookup(r), value):
-            case (('in', _), 0):
-                return  # impossible
-            case (('in', i), int(c)):
-                yield insert(substitution, f'in{i}', c)
-            case (('in', i), str(r)):
-                substitution = insert(substitution, r, f'in{i}')
-                for n in range(1, 10):
-                    yield insert(substitution, f'in{i}', n)
-            case (str(r), int(c)):
-                yield from self.equals(substitution, r, c)
-            case (('+', a, b), 0):
-                # assuming all intermediate values are positive
-                yield from conj(self.equals(substitution, b, 0),
-                                self.equals(substitution, a, 0))
-            case (('+', a, b), c):
-                yield from self.equals(substitution, a, sub(c, b))
-            case (('*', a, b), 0):
-                yield from disj(self.equals(substitution, b, 0),
-                                self.equals(substitution, a, 0))
-            case (('*', a, b), c):
-                yield from self.equals(substitution, a, div(c, b))
-            case (('/', a, int(_)), 0):
-                yield from self.equals(substitution, a, 0)
-            case (('%', a, int(b)), c):
-                for n in natural_numbers():
-                    yield from self.equals(substitution, a, add(n * b, c))
-            case (('!=', a, int(b)), 0):
-                yield from self.equals(substitution, a, b)
-            case (('!=', a, b), 0):
-                yield from self.equals(substitution, b, a)
-            case exp: raise NotImplementedError(exp, substitution)
-
-    def equals(self, substitution, a0, b0):
-        a = self.walk(substitution, a0)
-        b = self.walk(substitution, b0)
-        match a, b:
-            case int(a), int(b) if a == b:
-                yield substitution
-            case int(a), int(b) if a != b:
-                return
-            case str(a), int(b):
-                yield from self.substitute(substitution, a, b)
-            case str(a), str(b):
-                yield from self.substitute(substitution, a, b)
-            case str(a), ('-', _, _):
-                yield from self.substitute(substitution, a, b)
-            case str(a), ('/', _, _):
-                yield from self.substitute(substitution, a, b)
-            case other: raise NotImplementedError(other, substitution)
-
-    def walk(self, substitution, v):
-        match v:
-            case str(x):
-                if x in substitution:
-                    return self.walk(substitution, x)
-                else:
-                    return x
-            case int(i): return i
-            case ('-', a, b):
-                a = self.walk(substitution, a)
-                b = self.walk(substitution, b)
-                if isinstance(a, int) and isinstance(b, int):
-                    return a - b
-                else:
-                    return v
-            case ('/', a, b):
-                a = self.walk(substitution, a)
-                b = self.walk(substitution, b)
-                if isinstance(a, int) and isinstance(b, int):
-                    return a // b
-                else:
-                    return v
-            case _: raise NotImplementedError(v)
-
-    def constrain(self, constraints, r, force):
-        def add_constraint(r, constraint):
-            match constraints[r], constraint:
-                case (None, c):
-                    result = c
-                case other:
-                    raise NotImplementedError(other)
-            return constraints | {r: result}
-
-        #constraints = add_constraint(r, constraint)
-        constraints |= {r: ('==', force)}
-
-        match (self.code.lookup(r), constraints[r]):
-            case (('+', a, b), ('==', 0)):
-                # assuming all intermediate values are positive
-                yield from conj(self.constrain(constraints, b, 0),
-                                self.constrain(constraints, a, 0))
-            case (('*', a, b), ('==', 0)):
-                yield from disj(self.constrain(constraints, b, 0),
-                                self.constrain(constraints, a, 0))
-            #case (('!=', 'x82', 'w14'), ('==', 0)):
-            case exp: raise NotImplementedError(exp)
-
-    def solve_backward(self, exp1, op, exp2):
-        print(exp1, op, exp2)
-        match exp1, op, exp2:
-            case ('in', _), '==', b: return self.solve_backward(a, '==', ('do', exp1))
-            case a, op, ('in', _): return self.solve_backward(a, op, ('do', exp2))
-            case 0, '==', 0: return True
-            case int(_), '==', 0: return False
-            case 0, '==', int(_): return False
-            case str(r), op, b: return self.solve_backward(self.assignments[r], op, b)
-            case a, op, str(r): return self.solve_backward(a, op, self.assignments[r])
-            case ('+', a, int(b)), '==', c:
-                return self.solve_backward(a, '==', c - b)
-            case ('+', int(a), b), '==', c:
-                return self.solve_backward(b, '==', c - a)
-            case ('+', a, b), '==', 0:
-                return ('and',
-                    self.solve_backward(b, '==', 0),
-                    self.solve_backward(a, '==', 0))
-            case ('+', a, int(b)), '==', ('do', c):
-                return self.solve_backward(a, '==', ('do', ('-', c, b)))
-            case ('*', a, b), '==', 0:
-                return ('or',
-                    self.solve_backward(b, '==', 0),
-                    self.solve_backward(a, '==', 0))
-            case ('/', a, int(b)), '==', 0:
-                return self.solve_backward(a, "<", b)
-            case ('%', a, int(b)), '==', ('do', c):
-                return self.solve_backward(a, '==', ('do', ('%-inv', c, b)))
-            case ('==', a, b), '==', 0:
-                return self.solve_backward(a, '!=', b)
-            case ('!=', a, b), '==', 0:
-                return self.solve_backward(a, '==', b)
-            case ('==', a, b), '!=', 0:
-                return self.solve_backward(a, '==', b)
-
-            case _: raise NotImplementedError(f'{exp1} {op} {exp2}')
-
-    def rename(self, assignments):
-        cmds = []
-        for var, exp in assignments.items():
-            match exp:
-                case ('in', i):
-                    pass
-                case (op, str(a), str(b)):
-                    exp = (op, a[0], b[0])
-                case (op, str(a), b):
-                    exp = (op, a[0], b)
-                case (op, a, str(b)):
-                    exp = (op, a, b[0])
-                case (op, a, b):
-                    exp = (op, a, b)
-                case int(c): exp = c
-                case str(r): exp = r[0];
-                case _: raise NotImplementedError(exp)
-            cmds.append((var[0], exp))
-        return cmds
-
-    def make_rust(self, assignments):
-        cmds = []
-        for var, exp in assignments:
-            match exp:
-                case ('in', i):
-                    val = f'input[{i}]'
-                case ('+', a, b):
-                    val = f'{a} + {b}'
-                case ('*', a, b):
-                    val = f'{a} * {b}'
-                case ('/', a, b):
-                    val = f'{a} / {b}'
-                case ('%', a, b):
-                    val = f'{a} % {b}'
-                case ('==', a, b):
-                    val = f'if {a} == {b} {{ 1 }} else {{ 0 }}'
-                case ('!=', a, b):
-                    val = f'if {a} != {b} {{ 1 }} else {{ 0 }}'
-                case int(c): val = c
-                case str(r): val = r
-                case _: raise NotImplementedError(exp)
-            cmds.append(f'let {var} = {val};')
-            print(cmds[-1])
-        return cmds
-
-
-class Analyze:
-    def __init__(self, code, registers='wxyz'):
-        self.registers = {r: 0 for r in registers}
-        for line in code:
-            line = list(line.split())
-            try:
-                line[2] = int(line[2])
-            except IndexError:
-                pass
-            except ValueError:
-                pass
-            self.analyze(line)
-
-    def analyze(self, line):
+    def assign(r, exp):
+        assignments.append(('set', r, exp))
+    assignments = [('set', 'w', 0), ('set', 'x', 0), ('set', 'y', 0), ('set', 'z', 0)]
+    for line in code:
+        line = list(line.split())
+        try:
+            line[2] = int(line[2])
+        except IndexError:
+            pass
+        except ValueError:
+            pass
         match line:
             case ['inp', r]:
-                self.assign(r, self.next_input())
-            case ['add', a, int(b)]:
-                self.assign(a, self.add(self.get(a), b))
+                assign(r, ('in', next_input()))
             case ['add', a, b]:
-                self.assign(a, self.add(self.get(a), self.get(b)))
-            case ['mul', a, int(b)]:
-                self.assign(a, self.mul(self.get(a), b))
+                assign(a, add(a, b))
             case ['mul', a, b]:
-                self.assign(a, self.mul(self.get(a), self.get(b)))
-            case ['div', a, int(b)]:
-                self.assign(a, self.div(self.get(a), b))
+                assign(a, mul(a, b))
             case ['div', a, b]:
-                self.assign(a, self.div(self.get(a), self.get(b)))
-            case ['mod', a, int(b)]:
-                self.assign(a, self.mod(self.get(a), b))
+                assign(a, div(a, b))
             case ['mod', a, b]:
-                self.assign(a, self.mod(self.get(a), self.get(b)))
-            case ['eql', a, int(b)]:
-                self.assign(a, self.eql(self.get(a), b))
+                assign(a, mod(a, b))
             case ['eql', a, b]:
-                self.assign(a, self.eql(self.get(a), self.get(b)))
-            case _: raise SyntaxError(line)
+                assign(a, eql(a, b))
+            case _:
+                raise SyntaxError(line)
+    expr = ('ret', r_result)
+    for stmt in assignments[::-1]:
+        expr = ('begin', stmt, expr)
+    return expr
 
 
-class SSABuilder(Analyze):
-    def __init__(self, code, registers='wxyz'):
-        self.n_inputs = 0
-        self.register_versions = {r: -1 for r in registers}
-        self.assignments = {}
-        for r in registers:
-            self.assign(r, 0)
-        super().__init__(code, registers)
-
-    def eval(self, r_out, inputs):
+def evaluate(exp, inputs, register_values=None):
+    if register_values is None:
         register_values = {}
-        for r, exp in self.assignments.items():
-            match exp:
-                case int(i): val = i
-                case str(x): val = register_values[x]
-                case ('in', i): val = inputs[i]
-                case ('+', a, int(b)): val = register_values[a] + b
-                case ('+', a, b): val = register_values[a] + register_values[b]
-                case ('*', a, int(b)): val = register_values[a] * b
-                case ('*', int(a), b): val = a * register_values[b]
-                case ('*', a, b): val = register_values[a] * register_values[b]
-                case ('/', a, int(b)): val = register_values[a] // b
-                case ('/', a, b): val = register_values[a] // register_values[b]
-                case ('==', a, int(b)): val = 1 if register_values[a] == b else 0
-                case ('==', a, b): val = 1 if register_values[a] == register_values[b] else 0
-                case ('!=', a, int(b)): val = 1 if register_values[a] != b else 0
-                case ('!=', a, b): val = 1 if register_values[a] != register_values[b] else 0
-                case ('%', a, int(b)): val = register_values[a] % b
-                case _: raise NotImplementedError(exp)
-            register_values[r] = val
-        return register_values[r_out]
 
-    def optimize(self, r_result):
-        assignments = None
-        while self.assignments != assignments:
-            assignments = self.assignments
-            self.inline_trivial_assignments()
-            self.fold_constants()
-            self.peephole()
-        self.remove_unused(r_result)
+    match exp:
+        case ('begin', first, second):
+            evaluate(first, inputs, register_values)
+            return evaluate(second, inputs, register_values)
+        case ('set', r, x):
+            register_values[r] = evaluate(x, inputs, register_values)
+        case ('ret', x): return evaluate(x, inputs, register_values)
+        case int(i): return i
+        case str(x): return register_values[x]
+        case ('in', i): return inputs[i]
 
-    def peephole(self):
-        assignments = {}
-        for r, exp in self.assignments.items():
-            match self.expand(exp):
-                case ('==', ('==', a, b), 0):
-                    exp = ('!=', a, b)
-                #case ('==', int(c), ('in', _)) if not 1 <= c <= 9 :
-                #    exp = 0
-                case ('!=', int(c), ('in', _)) if not 1 <= c <= 9 :
-                    exp = 1
-                case ('!=', ('+', _, c), ('in', _)) if c >= 10:
-                    exp = 1
-                case ('%', ('in', i), int(c)) if c > 10 :
-                    exp = exp[1]
-                case _: pass
+        case ('if', cond, yes, no):
+            if evaluate(cond, inputs, register_values) == 1:
+                return evaluate(yes, inputs, register_values)
+            else:
+                return evaluate(no, inputs, register_values)
 
-            match self.expand(exp, 2):
-                case ('%', ('+', ('*', _, f), b), g) if f == g:
-                    exp = b
-                case _: pass
+        case (op, a, b):
+            a = evaluate(a, inputs, register_values)
+            b = evaluate(b, inputs, register_values)
+            match op:
+                case '+': return a + b
+                case '-': return a - b
+                case '*': return a * b
+                case '/': return a // b
+                case '%': return a % b
+                case '==': return a == b
+                case '!=': return a != b
+                case _: raise NotImplementedError(op)
+        case _: raise NotImplementedError(exp)
 
-            assignments[r] = exp
-        self.assignments = assignments
 
-    def expand(self, exp, n=1):
-        match exp:
-            case int(_): return exp
-            case str(_): return self.lookup(exp)
-            case ('in', _): return exp
-            case (op, a, b) if n > 0: return (op, self.expand(self.lookup(a), n-1), self.expand(self.lookup(b), n-1))
-            case _: return exp
+def optimize(exp):
+    match exp:
+        # unneeded assignment like z := z
+        case('begin', ('set', r, z), rest) if r == z: return optimize(rest)
 
-    def lookup(self, x):
-        match x:
-            case int(_): return x
-            case str(_): return self.assignments[x]
-            case _: raise NotImplementedError(x)
+        # constant inlining
+        case ('begin', ('set', c, int(a)), rest):
+            return optimize(replace(rest, c, a))
 
-    def fold_constants(self):
-        assignments = {}
-        for r, exp in self.assignments.items():
-            match exp:
-                case ('+', 0, b): exp = b
-                case ('+', a, 0): exp = a
-                case ('+', int(a), int(b)):
-                    exp = a + b
-                case ('*', 1, b): exp = b
-                case ('*', a, 1): exp = a
-                case ('*', 0, b): exp = 0
-                case ('*', a, 0): exp = 0
-                case ('*', int(a), int(b)):
-                    exp = a + b
-                case ('/', a, 1): exp = a
-                case ('/', int(a), int(b)):
-                    exp = a + b
-                case ('%', int(a), int(b)):
-                    exp = a % b
-                case ('==', int(a), int(b)):
-                    exp = 1 if a == b else 0
-                case _: pass
-            assignments[r] = exp
-        self.assignments = assignments
+        # negated equality check
+        case ('begin', ('set', c, ('==', a, b)),
+                       ('begin', ('set', z, ('==', x, 0)),
+                                 rest)) if c == x:
+            return optimize(('begin', ('set', z, ('!=', a, b)), rest))
 
-    def inline_trivial_assignments(self):
-        constants = {}
-        for r, exp in self.assignments.items():
-            match exp:
-                case int(_) | str(_): constants[r] = exp
+        # immediately overwritten alias
+        case ('begin', ('set', c, str(a)),
+                       ('begin', ('set', z, (op, x, y)),
+                                 rest)) if c == z:
+            x = replace(x, c, a)
+            y = replace(y, c, a)
+            return optimize(('begin', ('set', z, (op, x, y)), rest))
 
-        assignments = {}
-        for r, exp in self.assignments.items():
-            match exp:
-                case (*_,):
-                    exp = tuple(constants[x] if x in constants else x for x in exp)
-                case str(x) if x in constants:
-                    exp = constants[x]
-            assignments[r] = exp
-        self.assignments = assignments
+        # irrefutable condition (assuming w always holds an input value in range 1...9)
+        case ('begin', ('set', c, ('+', a, int(b))),
+                       ('begin', ('set', z, ('==', x, 'w')),
+                                 rest)) if b >= 10:
+            return optimize(('begin', ('set', z, 0), rest))
 
-    def remove_unused(self, r_result):
-        used = set()
-        self.visit(r_result, used)
-        self.assignments = {r: exp for r, exp in self.assignments.items() if r in used}
-        print(len(used))
+        case ('begin', first, second):
+            a = optimize(first)
+            if a != first:
+                return optimize(('begin', a, second))
+            return ('begin', a, optimize(second))
 
-    def visit(self, key, visited=None, visitor=None):
-        if visited is None:
-            visited = set()
-        self.visit_(key, visited)
+        case ('set', var, val):
+            return ('set', var, optimize(val))
 
-    def visit_(self, key, visited):
-        if key in visited:
-            return
-        visited.add(key)
-        exp = self.assignments[key]
-        match exp:
-            case('in', _):
-                pass
-            case (_, int(a), int(b)):
-                raise RuntimeError(exp)
-            case (_, int(a), b):
-                self.visit_(b, visited)
-            case (_, a, int(b)):
-                self.visit_(a, visited)
-            case (_, a, b):
-                self.visit_(a, visited)
-                self.visit_(b, visited)
-            case str(r):
-                self.visit_(r, visited)
-            case int(r):
-                pass
-            case _: raise NotImplementedError(f'visit {exp}')
+        case ('if', cond, yes, no):
+            return ('if', cond, optimize(yes), optimize(no))
 
-    def compute_ranges(self):
-        ranges = {i: (i, i) for i in range(-30, 30)}
-        for var, exp in self.assignments.items():
-            match exp:
-                case ('in', i):
-                    vals = (1, 9)
-                case ('+', a, b):
-                    vals = tuple(av + bv for av, bv in zip(ranges[a], ranges[b]))
-                case ('*', a, b):
-                    vals = tuple(av * bv for av, bv in zip(ranges[a], ranges[b]))
-                case ('/', a, b):
-                    vals = tuple(av // bv for av, bv in zip(ranges[a], ranges[b][::-1]))
-                case ('%', a, int(b)):
-                    vals = (0, b - 1)  # todo: range may be smaller depending on 'a'
-                case ('==', a, b):
-                    vals = (0, 1)
-                case ('!=', a, b):
-                    vals = (0, 1)
-                case int(c):
-                    vals = (c, c)
-                case str(r):
-                    vals = ranges[r]
-                case _:
-                    raise NotImplementedError(exp)
-            ranges[var] = vals
-            self.value_ranges = ranges
-        return ranges
+        case ('+', 0, b): return b
+        case ('+', a, 0): return a
+        case ('+', int(a), int(b)): return a + b
+        case ('*', 1, b): return b
+        case ('*', a, 1): return a
 
-    def assign(self, r, x):
-        i = self.register_versions[r] + 1
-        self.register_versions[r] = i
-        self.assignments[f'{r}{i}'] = x
+        case ('*', 0, _): return 0
+        case ('*', _, 0): return 0
+        case ('*', int(a), int(b)): return a * b
+        case ('%', 0, _): return 0
+        case ('==', int(a), int(b)): return int(a == b)
 
-    def get(self, r):
-        return f'{r}{self.register_versions[r]}'
+        case _: return exp
 
-    def next_input(self):
-        i = self.n_inputs
-        self.n_inputs += 1
-        return ('in', i)
 
-    def add(self, x, y):
-        match x, y:
-            case x, 0: return x
-            case 0, y: return y
-            case int(x), int(y): return x + y
-            case ('+', x, int(y)), int(z): return ('+', x, y + z)
-            case ('+', int(x), y), int(z): return ('+', y, x + z)
-            case _: return ('+', x, y)
+def inline_variables(exp):
+    match exp:
+        case ('if', c, a, b):
+            return ('if', c, inline_variables(a), inline_variables(b))
+        case ('begin', ('set', var, ('!=', _, _)) as first, rest):
+            return ('begin', first, inline_variables(rest))
+        case ('begin', ('set', var, val), rest):
+            return inline_variables(replace(rest, var, val))
+        case ('begin', first, second):
+            return ('begin', first, inline_variables(second))
+        case _: return exp
 
-    def mul(self, x, y):
-        match x, y:
-            case x, 0: return 0
-            case 0, y: return 0
-            case x, 1: return x
-            case 1, y: return y
-            case int(x), int(y): return x * y
-            case ('*', x, int(y)), int(z): return ('*', x, y * z)
-            case ('*', int(x), y), int(z): return ('*', y, x * z)
-            case _: return ('*', x, y)
 
-    def div(self, x, y):
-        match x, y:
-            case x, 1: return x
-            case int(x), int(y): return x // y
-            case ('/', x, int(y)), int(z): return ('/', x, y * z)
-            case _: return ('/', x, y)
+def expand_branches(exp):
+    match exp:
+        case ('begin', ('set', var, ('=='|'!='as cmp, a, b)), rest):
+            rest = expand_branches(rest)
+            eq_branch = ('begin', ('set', var, 1), rest)
+            ne_branch = ('begin', ('set', var, 0), rest)
+            return ('if', (cmp, a, b), eq_branch, ne_branch)
+        case ('begin', first, second):
+            return ('begin', first, expand_branches(second))
+        case _: return exp
 
-    def mod(self, x, y):
-        match x, y:
-            case x, 1: return 0
-            case int(x), int(y): return x % y
-            case _: return ('%', x, y)
 
-    def eql(self, x, y):
-        match x, y:
-            case int(x), int(y): return 1 if x == y else 0
-            case ('==', x, y), int(1): return ('==', x, y)
-            case ('==', x, y), int(0): return ('!=', x, y)
-            case _: return ('==', x, y)
+def replace(exp, r, val):
+    match exp:
+        case int(_) | ('in', _): return exp
+        case str(s):
+            return val if s == r else s
+        case ('ret', x):
+            return ('ret', replace(x, r, val))
+        case ('begin', ('set', var, a), rest) if var == r:
+            a = replace(a, r, val)
+            return ('begin', ('set', var, a), rest)
+        case ('begin', first, second):
+            return ('begin', replace(first, r, val), replace(second, r, val))
+        case ('if', c, a, b):
+            return ('if', replace(c, r, val), replace(a, r, val), replace(b, r, val))
+        case ('+', a, int(b)):
+            match replace(a, r, val):
+                case ('+', c, int(d)): return ('+', c, b+d)
+                case other: return ('+', other, b)
+        case ('/', a, int(b)):
+            match replace(a, r, val):
+                case int(i): return i // b
+                case ('in', _) if b > 9: return 0
+                case ('+', ('*', x, m), k) if m == b and highest_possible_value(k) < b:
+                    return x
+                case other: return ('/', other, b)
+        case ('%', a, int(b)):
+            match replace(a, r, val):
+                case int(i): return i % b
+                case ('in', _) if b > 9: return val
+                case ('+', ('*', _, m), x) if m == b:
+                    return x
+                case other: return ('%', other, b)
+        case (op, a, b):
+            return (op, replace(a, r, val), replace(b, r, val))
+        case _: raise NotImplementedError(exp)
+
+
+def highest_possible_value(exp):
+    match exp:
+        case int(i): return i
+        case ('in', _): return 9
+        case ('+', a, b): return highest_possible_value(a) + highest_possible_value(b)
+        case _: raise NotImplementedError(exp)
+
+
+def is_zero(exp):
+    match exp:
+        case 0: return True
+        case int(_): return False
+        case ('in', _): return False
+        case ('if', c, a, b): return ('if', c, is_zero(a), is_zero(b))
+        case ('ret', x): return is_zero(x)
+        case ('+', a, b): return ('and', is_zero(a), is_zero(b))
+        case ('*', a, b): return ('or', is_zero(a), is_zero(b))
+        case _: raise NotImplementedError(exp)
+
+
+def simplify_logic(exp):
+    match exp:
+        case bool(b): return b
+        case ('if', ('!=', l, r), a, b):
+            return simplify_logic(('if', ('==', l, r), b, a))
+        case ('if', c, True, False): return c
+        case ('if', c, a, False): return simplify_logic(('and', c, a))
+        case ('if', _, a, b) if a == b: return a
+        case ('if', c, a, b):
+            a_ = simplify_logic(a)
+            b_ = simplify_logic(b)
+            if a_ == a and b_ == b:
+                return exp
+            else:
+                return simplify_logic(('if', c, a_, b_))
+        case ('and', bool(a), bool(b)): return a and b
+        case ('and', a, True): return simplify_logic(a)
+        case ('and', _, False): return False
+        case ('and', a, b):
+            a_ = simplify_logic(a)
+            b_ = simplify_logic(b)
+            if a_ == a and b_ == b:
+                return exp
+            else:
+                return simplify_logic(('and', a_, b_))
+        case ('or', bool(a), bool(b)): return a or b
+        case ('or', a, False): return simplify_logic(a)
+        case ('or', _, True): return False
+        case ('or', a, b):
+            a_ = simplify_logic(a)
+            b_ = simplify_logic(b)
+            if a_ == a and b_ == b:
+                return exp
+            else:
+                return simplify_logic(('or', a_, b_))
+        case ('==', _, _): return exp
+        case _: raise NotImplementedError(exp)
+
+
+def maximize(exp, inputs):
+    match exp:
+        case ('and', a, b):
+            maximize(a, inputs)
+            maximize(b, inputs)
+        case ('==', ('+', ('in', a), d), ('in', b)):
+            if d >= 0:
+                inputs[b] = 9
+                inputs[a] = 9 - d
+            else:
+                inputs[a] = 9
+                inputs[b] = 9 + d
+        case _: raise NotImplementedError(exp)
+    return inputs
+
+
+def minimize(exp, inputs):
+    match exp:
+        case ('and', a, b):
+            minimize(a, inputs)
+            minimize(b, inputs)
+        case ('==', ('+', ('in', a), d), ('in', b)):
+            if d >= 0:
+                inputs[a] = 1
+                inputs[b] = 1 + d
+            else:
+                inputs[a] = 1 - d
+                inputs[b] = 1
+        case _: raise NotImplementedError(exp)
+    return inputs
 
 
 def add(a, b):
@@ -521,6 +345,16 @@ def sub(a, b):
         case _: return ('-', a, b)
 
 
+def mul(a, b):
+    match a, b:
+        case _, 0: return 0
+        case 0, _: return 0
+        case a, 1: return a
+        case 1, b: return b
+        case int(a), int(b): return a * b
+        case _: return ('*', a, b)
+
+
 def div(a, b):
     match a, b:
         case a, 0: raise ValueError()
@@ -530,75 +364,21 @@ def div(a, b):
         case _: return ('/', a, b)
 
 
-def disj(*args):
-    for a in args:
-        yield from a
+def mod(a, b):
+    match a, b:
+        case a, 0: raise ValueError()
+        case a, 1: return 0
+        case 0, _: return 0
+        case int(a), int(b): return a % b
+        case _: return ('%', a, b)
 
 
-def conj(*args):
-    for x in itertools.product(*args):
-        substitution = {}
-        for s in x:
-            for k, v in s.items():
-                assert k not in substitution
-                substitution = insert(substitution, k, v)
-        yield substitution
-
-
-def insert(substitution, r, value):
-    def replace(v):
-        match v:
-            case int(v): return v
-            case str(v) if v == r: return value
-            case _: raise NotImplementedError(v)
-
-    sub_out = {r: value}
-    for k, v in substitution.items():
-        sub_out[k] = replace(v)
-    return sub_out
-
-
-def natural_numbers():
-    n = 0
-    while True:
-        yield n
-        n += 1
-
-
-def main():
-    #Part1().check(TEST1, 39)
-    #Part1().check(EXAMPLE3, 39)
-    Part1().run("inputs/day24.txt")
+def eql(a, b):
+    match a, b:
+        case a, b if a == b: return 1
+        case int(a), int(b): return int(a == b)
+        case _: return ('==', a, b)
 
 
 if __name__ == "__main__":
-    EXAMPLE1 = """inp x
-mul x -1"""
-
-    EXAMPLE2 = """inp z
-inp x
-mul z 3
-eql z x
-"""
-
-    EXAMPLE3 = """inp w
-add z w
-mod z 2
-div w 2
-add y w
-mod y 2
-div w 2
-add x w
-mod x 2
-div w 2
-mod w 2"""
-
-    TEST1 = """inp w
-eql w 3
-eql w 0
-inp z
-eql z 3
-eql z 0
-mul z w"""
-
     main()
